@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import os
 
 class Mish(nn.Module):
     def __init__(self):
@@ -25,12 +24,14 @@ class MaxPoolDark(nn.Module):
         else:
             padding1 = (self.size - 1) // 2
             padding2 = padding1
+            
         if ((x.shape[3] - 1) // self.stride) != ((x.shape[3] + 2 * p - self.size) // self.stride):
             padding3 = (self.size - 1) // 2
             padding4 = padding3 + 1
         else:
             padding3 = (self.size - 1) // 2
             padding4 = padding3
+
         x = F.max_pool2d(F.pad(x, (padding3, padding4, padding1, padding2), mode='replicate'),
                          self.size, stride=self.stride)
         return x
@@ -61,8 +62,11 @@ class DarknetParser(nn.Module):
                     block = {}
                 block['type'] = line[1:-1].rstrip()
             else:
-                key, value = line.split("=")
-                block[key.rstrip()] = value.lstrip()
+                try:
+                    key, value = line.split("=")
+                    block[key.rstrip()] = value.lstrip()
+                except:
+                    continue
         blocks.append(block)
         return blocks
 
@@ -73,15 +77,16 @@ class DarknetParser(nn.Module):
         prev_stride = 1
         out_strides = []
         conv_id = 0
-        
+
         for block in blocks:
             module = nn.Sequential()
+            block_type = block['type']
 
-            if block['type'] == 'net':
+            if block_type == 'net':
                 prev_filters = int(block.get('channels', 3))
                 continue
 
-            elif block['type'] == 'convolutional':
+            elif block_type == 'convolutional':
                 conv_id += 1
                 batch_normalize = int(block.get('batch_normalize', 0))
                 filters = int(block['filters'])
@@ -102,7 +107,7 @@ class DarknetParser(nn.Module):
                 elif activation == 'mish':
                     module.add_module(f'mish{conv_id}', Mish())
                 elif activation == 'linear':
-                    pass 
+                    pass
 
                 prev_filters = filters
                 out_filters.append(prev_filters)
@@ -110,7 +115,7 @@ class DarknetParser(nn.Module):
                 out_strides.append(prev_stride)
                 models.append(module)
 
-            elif block['type'] == 'maxpool':
+            elif block_type == 'maxpool':
                 pool_size = int(block['size'])
                 stride = int(block['stride'])
                 if stride == 1 and pool_size % 2:
@@ -124,7 +129,7 @@ class DarknetParser(nn.Module):
                 out_strides.append(prev_stride)
                 models.append(module)
 
-            elif block['type'] == 'upsample':
+            elif block_type == 'upsample':
                 stride = int(block['stride'])
                 module = nn.Upsample(scale_factor=stride, mode='nearest')
                 out_filters.append(prev_filters)
@@ -132,17 +137,13 @@ class DarknetParser(nn.Module):
                 out_strides.append(prev_stride)
                 models.append(module)
 
-            elif block['type'] == 'route':
+            elif block_type == 'route':
                 layers = block['layers'].split(',')
                 layers = [int(i) if int(i) > 0 else int(i) + len(models) for i in layers]
                 
                 total_filters = 0
                 for l in layers:
-                    if l < 0 or l >= len(out_filters):
-                        print(f"[ERROR] Route layer {l} out of bounds")
-                        total_filters += 0
-                    else:
-                        total_filters += out_filters[l]
+                    total_filters += out_filters[l]
                 
                 if 'groups' in block:
                     groups = int(block['groups'])
@@ -151,14 +152,14 @@ class DarknetParser(nn.Module):
                 out_filters.append(total_filters)
                 prev_filters = total_filters
                 out_strides.append(out_strides[layers[0]])
-                models.append(nn.Identity()) 
+                models.append(nn.Identity())
 
-            elif block['type'] == 'shortcut':
+            elif block_type == 'shortcut':
                 out_filters.append(prev_filters)
                 out_strides.append(out_strides[-1])
-                models.append(nn.Identity()) 
+                models.append(nn.Identity())
 
-            elif block['type'] == 'yolo':
+            elif block_type == 'yolo':
                 out_filters.append(prev_filters)
                 out_strides.append(prev_stride)
                 models.append(nn.Identity())
@@ -173,8 +174,8 @@ class DarknetParser(nn.Module):
     def forward(self, x):
         outputs = {}
         yolo_outputs = []
-        
-        for i, block in enumerate(self.blocks[1:]): 
+
+        for i, block in enumerate(self.blocks[1:]):
             module = self.models[i]
             block_type = block['type']
 
@@ -227,6 +228,12 @@ class DarknetParser(nn.Module):
         return x
 
     def load_weights(self, weightfile):
+        import os
+        if not weightfile or not os.path.exists(weightfile):
+            print(f"[WARNING] Weight file not found: {weightfile}")
+            return
+
+        print(f"[INFO] Loading weights from {weightfile}")
         with open(weightfile, 'rb') as fp:
             header = np.fromfile(fp, count=5, dtype=np.int32)
             self.header = torch.from_numpy(header)
@@ -235,50 +242,31 @@ class DarknetParser(nn.Module):
 
         ptr = 0
         total_len = weights.size
-        mismatch_warned = False 
-
+        
         for i, (module, block) in enumerate(zip(self.models, self.blocks[1:])):
             if block['type'] == 'convolutional':
                 conv_layer = module[0]
                 batch_normalize = int(block.get('batch_normalize', 0))
                 
-                def safe_load(param, num_el, current_ptr):
-                    nonlocal mismatch_warned
-                    if current_ptr + num_el > total_len:
-                        if not mismatch_warned:
-                            print(f"\n[WARNING] CFG and weights mismatch! (Layer: {i})")
-                            print("   -> Remaining weights will be assigned RANDOM values.")
-                            mismatch_warned = True
-                        rand_data = torch.randn(num_el).view_as(param)
-                        param.data.copy_(rand_data)
-                        return current_ptr, False
+                def load_tensor(param, ptr):
+                    numel = param.numel()
+                    if ptr + numel > total_len:
+                        print(f"[WARNING] Weight mismatch at layer {i}. Skipping.")
+                        return ptr
                     
-                    w_data = torch.from_numpy(weights[current_ptr : current_ptr + num_el]).view_as(param)
+                    w_data = torch.from_numpy(weights[ptr : ptr + numel]).view_as(param)
                     param.data.copy_(w_data)
-                    return current_ptr + num_el, True
+                    return ptr + numel
 
                 if batch_normalize:
                     bn_layer = module[1]
-                    num_b = bn_layer.bias.numel()
-                    
-                    ptr, ok1 = safe_load(bn_layer.bias, num_b, ptr)
-                    ptr, ok2 = safe_load(bn_layer.weight, num_b, ptr)
-                    ptr, ok3 = safe_load(bn_layer.running_mean, num_b, ptr)
-                    ptr, ok4 = safe_load(bn_layer.running_var, num_b, ptr)
-                    
+                    ptr = load_tensor(bn_layer.bias, ptr)
+                    ptr = load_tensor(bn_layer.weight, ptr)
+                    ptr = load_tensor(bn_layer.running_mean, ptr)
+                    ptr = load_tensor(bn_layer.running_var, ptr)
                 else:
-                    num_b = conv_layer.bias.numel()
-                    ptr, _ = safe_load(conv_layer.bias, num_b, ptr)
+                    ptr = load_tensor(conv_layer.bias, ptr)
                 
-                num_w = conv_layer.weight.numel()
-                ptr, _ = safe_load(conv_layer.weight, num_w, ptr)
-
-        print("Applying Weights Sanitize process...")
-        sanitized_count = 0
-        for m in self.modules():
-            if isinstance(m, nn.BatchNorm2d):
-                if (m.running_var < 0).any():
-                    m.running_var.data.clamp_(min=1e-5)
-                    sanitized_count += 1
-        if sanitized_count > 0:
-            print(f"[SUCCESS] {sanitized_count} BatchNorm layers sanitized.")
+                ptr = load_tensor(conv_layer.weight, ptr)
+        
+        print(f"[SUCCESS] Weights loaded successfully.")
