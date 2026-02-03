@@ -1,0 +1,30 @@
+=== Universal ONNX Converter Tutorial ===
+
+*** MANDATORY: Environment Setup ***
+Setting up a dedicated environment is REQUIRED for stability.
+This program is validated only with the specific versions in requirements.txt.
+
+Installation steps:
+1. Create a virtual environment (conda or venv)
+2. Install dependencies:
+   pip install -r requirements.txt
+
+--- Usage Examples ---
+
+1. Darknet to ONNX (NPU Optimized)
+python main.py --mode darknet --cfg model.cfg --weights model.weights --output model.onnx --shape 1 3 416 416 --validate
+
+2. PyTorch to ONNX (NPU Optimized)
+python main.py --mode pytorch --weights model.pt --output model.onnx --shape 1 3 640 640 --validate
+
+3. Darknet to PyTorch
+python main.py --mode darknet --cfg model.cfg --weights model.weights --output_mode pt --output model.pt
+
+Notes:
+- Use --validate to ensure the ONNX model matches the original.
+- Use --no-simplify to disable ONNX model simplification.
+- Use --output_mode pt to save the model as a PyTorch file.
+- Default export mode is ONNX if not specified.
+- Default shape is 1x3x416x416 if not specified.
+- If exporting without weights, skip the --weights flag; weights will be generated randomly.
+- Opset 11 is enforced on ONNX models for NPU compatibility.
