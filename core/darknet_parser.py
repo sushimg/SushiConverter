@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import os
+from .logger import log_info, log_warning, log_success
 
 class Mish(nn.Module):
     def __init__(self):
@@ -66,6 +68,7 @@ class DarknetParser(nn.Module):
                     key, value = line.split("=")
                     block[key.rstrip()] = value.lstrip()
                 except:
+                    log_warning(f"Skipping malformed line in CFG: {line}")
                     continue
         blocks.append(block)
         return blocks
@@ -141,13 +144,13 @@ class DarknetParser(nn.Module):
                 layers = block['layers'].split(',')
                 layers = [int(i) if int(i) > 0 else int(i) + len(models) for i in layers]
                 
-                total_filters = 0
-                for l in layers:
-                    total_filters += out_filters[l]
-                
                 if 'groups' in block:
                     groups = int(block['groups'])
                     total_filters = out_filters[layers[0]] // groups
+                else:
+                    total_filters = 0
+                    for l in layers:
+                        total_filters += out_filters[l]
 
                 out_filters.append(total_filters)
                 prev_filters = total_filters
@@ -165,6 +168,7 @@ class DarknetParser(nn.Module):
                 models.append(nn.Identity())
 
             else:
+                log_warning(f"Unknown block type: {block_type}. Using Identity.")
                 out_filters.append(prev_filters)
                 out_strides.append(prev_stride)
                 models.append(nn.Identity())
@@ -228,12 +232,11 @@ class DarknetParser(nn.Module):
         return x
 
     def load_weights(self, weightfile):
-        import os
         if not weightfile or not os.path.exists(weightfile):
-            print(f"[WARNING] Weight file not found: {weightfile}")
+            log_warning(f"Weight file not found: {weightfile}")
             return
 
-        print(f"[INFO] Loading weights from {weightfile}")
+        log_info(f"Loading weights from {weightfile}")
         with open(weightfile, 'rb') as fp:
             header = np.fromfile(fp, count=5, dtype=np.int32)
             self.header = torch.from_numpy(header)
@@ -251,8 +254,8 @@ class DarknetParser(nn.Module):
                 def load_tensor(param, ptr):
                     numel = param.numel()
                     if ptr + numel > total_len:
-                        print(f"[WARNING] Weight mismatch at layer {i}. Skipping.")
-                        return ptr
+                        raise RuntimeError(f"Weight mismatch at layer {i}: expected {numel} more values, but reached EOF. "
+                                           f"Check if you are using the correct weights for this .cfg file.")
                     
                     w_data = torch.from_numpy(weights[ptr : ptr + numel]).view_as(param)
                     param.data.copy_(w_data)
@@ -269,4 +272,4 @@ class DarknetParser(nn.Module):
                 
                 ptr = load_tensor(conv_layer.weight, ptr)
         
-        print(f"[SUCCESS] Weights loaded successfully.")
+        log_success("Weights loaded successfully.")

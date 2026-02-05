@@ -1,0 +1,57 @@
+import cv2
+import numpy as np
+import os
+from core.logger import log_info, log_warning, log_error, log_success
+
+def validate_with_opencv(onnx_path, input_shape):
+    log_info("Initializing OpenCV DNN validation...")
+    
+    batch, channels, height, width = input_shape
+    
+    if not os.path.exists(onnx_path):
+        log_error(f"ONNX file not found for OpenCV validation: {onnx_path}")
+        return False
+
+    try:
+        net = cv2.dnn.readNetFromONNX(onnx_path)
+        net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+        net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        test_image = os.path.join(current_dir, "data", "dog.jpg")
+        
+        if os.path.exists(test_image):
+            img = cv2.imread(test_image)
+            log_info(f"Using test image: {test_image}")
+        else:
+            log_warning(f"Test image not found at {test_image}. Using random data.")
+            img = np.random.randint(0, 255, (height, width, channels), dtype=np.uint8)
+
+        blob = cv2.dnn.blobFromImage(img, 1/255.0, (width, height), swapRB=True, crop=False)
+        
+        net.setInput(blob)
+        
+        out_names = net.getUnconnectedOutLayersNames()
+        outputs = net.forward(out_names)
+        
+        log_info(f"OpenCV DNN inference successful with {len(outputs)} output(s).")
+        
+        all_ok = True
+        for i, out in enumerate(outputs):
+            max_val = np.max(out)
+            mean_val = np.mean(out)
+            log_info(f"Output {i} -> Shape: {out.shape}, Max: {max_val:.6f}, Mean: {mean_val:.6f}")
+            
+            if np.isnan(max_val) or np.isinf(max_val):
+                log_error(f"Output {i} contains invalid values (NaN/Inf).")
+                all_ok = False
+            elif max_val == 0 and mean_val == 0:
+                log_warning(f"Output {i} is all zeros. Possible dead model or incorrect weights.")
+        
+        if all_ok:
+            log_success("OpenCV DNN validation passed.")
+        return all_ok
+
+    except Exception as e:
+        log_error(f"OpenCV DNN validation failed: {e}")
+        return False

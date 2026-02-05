@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import os
 import onnx
+from core.logger import log_info, log_warning, log_error, log_success
 
 class RawNPUHead(nn.Module):
     def __init__(self, original_layer):
@@ -38,7 +39,7 @@ def export_pytorch_to_onnx(model, input_shape, output_path):
         )
         return True
     except Exception as e:
-        print(f"[ERROR] Export failed: {e}")
+        log_error(f"Export failed: {e}")
         raise e
 
 def try_export_ultralytics(model, input_shape, output_path):
@@ -60,7 +61,7 @@ def try_export_ultralytics(model, input_shape, output_path):
     except:
         return False
 
-    print(f"[INFO] Ultralytics model detected. Applying NPU optimization...")
+    log_info("Ultralytics model detected. Applying NPU optimization...")
 
     try:
         new_layer = RawNPUHead(last_layer)
@@ -69,10 +70,10 @@ def try_export_ultralytics(model, input_shape, output_path):
                 setattr(new_layer, attr, getattr(last_layer, attr))
         
         model_layers[-1] = new_layer
-        print("[INFO] Replaced Detect layer with NPU-friendly head.")
+        log_info("Replaced Detect layer with NPU-friendly head.")
         
     except Exception as e:
-        print(f"[WARNING] Could not apply NPU transformation: {e}")
+        log_warning(f"Could not apply NPU transformation: {e}")
         return False
 
     try:
@@ -80,7 +81,7 @@ def try_export_ultralytics(model, input_shape, output_path):
         dummy_input = torch.randn(*input_shape).to(device)
         model.eval()
 
-        print(f"[INFO] Exporting to ONNX (Opset {OPSET_VERSION})...")
+        log_info(f"Exporting to ONNX (Opset {OPSET_VERSION})...")
         torch.onnx.export(
             model,
             dummy_input,
@@ -98,9 +99,9 @@ def try_export_ultralytics(model, input_shape, output_path):
         if os.path.exists(data_file):
             os.remove(data_file)
 
-        print("[SUCCESS] Ultralytics export completed.")
+        log_success("Ultralytics export completed.")
         return True
 
     except Exception as e:
-        print(f"[ERROR] Ultralytics export failed: {e}")
+        log_error(f"Ultralytics export failed: {e}")
         raise e

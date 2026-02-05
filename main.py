@@ -7,6 +7,8 @@ from core.darknet_parser import DarknetParser
 from exporters.engine import export_pytorch_to_onnx, try_export_ultralytics
 from exporters.post_process import optimize_for_npu
 from validators.compare import validate_conversion
+from validators.inference import validate_with_opencv
+from core.logger import log_info, log_warning, log_error, log_success, set_color_mode
 
 def show_tutorial():
     tutorial_path = os.path.join(os.path.dirname(__file__), 'tutorial.txt')
@@ -14,7 +16,7 @@ def show_tutorial():
         with open(tutorial_path, 'r') as f:
             print(f.read())
     else:
-        print("[ERROR] Tutorial file not found.")
+        log_error("Tutorial file not found.")
 
 def get_args():
     parser = argparse.ArgumentParser(
@@ -32,11 +34,11 @@ def get_args():
     group.add_argument('--weights', type=str, help='Path to weight file (.weights or .pt)')
     group.add_argument('--cfg', type=str, help='Path to .cfg file (Darknet mode only)')
     group.add_argument('--output', type=str, default='model.onnx', help='Output path (default: model.onnx)')
-    group.add_argument('--output_mode', type=str, default='onnx', choices=['onnx', 'pt'],
+    group.add_argument('--output-mode', type=str, default='onnx', choices=['onnx', 'pt'],
                         help='Output format:\n'
                              '  onnx: NPU optimized Opset 11\n'
                              '  pt  : Standard PyTorch file')
-    group.add_argument('--shape', type=int, nargs=4, default=[1, 3, 416, 416], 
+    group.add_argument('--shape', type=int, nargs=4, default=None, 
                         help='Input shape: B C H W (default: 1 3 416 416)')
     
     group = parser.add_argument_group('Advanced Flags')
@@ -47,30 +49,30 @@ def get_args():
     return parser.parse_args()
 
 def load_model(args):
-    print(f"[INFO] Loading {args.mode.upper()} model...")
+    log_info(f"Loading {args.mode.upper()} model...")
     model = None
     
     if args.mode == 'darknet':
         if not args.cfg:
-            print("[ERROR] Darknet mode requires a --cfg file.")
+            log_error("Darknet mode requires a --cfg file.")
             sys.exit(1)
         try:
             model = DarknetParser(args.cfg)
             if args.weights:
                 model.load_weights(args.weights)
             else:
-                print("[INFO] No weights provided. Using random initialization.")
-            print(f"[SUCCESS] Darknet model is ready.")
+                log_info("No weights provided. Using random initialization.")
+            log_success("Darknet model is ready.")
         except Exception as e:
-            print(f"[ERROR] Could not load Darknet model: {e}")
+            log_error(f"Could not load Darknet model: {e}")
             sys.exit(1)
 
     elif args.mode == 'pytorch':
         if not args.weights:
-            print("[ERROR] PyTorch mode requires a --weights file.")
+            log_error("PyTorch mode requires a --weights file.")
             sys.exit(1)
             
-        print(f"[INFO] Reading file: {args.weights}")
+        log_info(f"Reading file: {args.weights}")
         try:
             try:
                 loaded = torch.load(args.weights, map_location='cpu', weights_only=False)
@@ -82,7 +84,7 @@ def load_model(args):
                     model = loaded['model']
                     if hasattr(model, 'float'): model.float()
                 elif 'state_dict' in loaded:
-                    print("[ERROR] Found only state_dict. Model architecture is missing.")
+                    log_error("Found only state_dict. Model architecture is missing.")
                     sys.exit(1)
                 else:
                     model = loaded
@@ -93,9 +95,9 @@ def load_model(args):
                 try: model.fuse()
                 except: pass
                 
-            print("[SUCCESS] PyTorch model is ready.")
+            log_success("PyTorch model is ready.")
         except Exception as e:
-            print(f"[ERROR] Could not load PyTorch model: {e}")
+            log_error(f"Could not load PyTorch model: {e}")
             sys.exit(1)
 
     if hasattr(model, 'eval'):
@@ -103,6 +105,7 @@ def load_model(args):
     return model
 
 def main():
+    set_color_mode()
     args = get_args()
     
     if args.tutorial:
@@ -110,43 +113,81 @@ def main():
         return
 
     if not args.mode:
-        print("[ERROR] Please specify --mode or use --tutorial.")
+        log_error("Please specify --mode or use --tutorial.")
         return
 
     model = load_model(args)
 
+    if args.shape is None:
+        if args.mode == 'darknet' and hasattr(model, 'width') and hasattr(model, 'height'):
+            args.shape = [1, 3, model.height, model.width]
+            log_info(f"Auto-detected input shape from CFG: {args.shape}")
+        else:
+            args.shape = [1, 3, 416, 416]
+            log_info(f"Using default input shape: {args.shape}")
+    else:
+        if args.mode == 'darknet' and hasattr(model, 'width') and hasattr(model, 'height'):
+            cfg_shape = [1, 3, model.height, model.width]
+            if args.shape != cfg_shape:
+                log_warning(f"Provided shape {args.shape} mismatch with CFG {cfg_shape}. Using provided shape.")
+            else:
+                log_info(f"Using input shape: {args.shape}")
+        else:
+            log_info(f"Using input shape: {args.shape}")
+
     if args.output_mode == 'pt':
-        print(f"[INFO] Saving model to PyTorch format...")
-        save_path = args.output if args.output.endswith('.pt') else args.output + '.pt'
+        log_info("Saving model to PyTorch format...")
+        save_path = args.output
+        if not save_path.lower().endswith('.pt'):
+            save_path += '.pt'
+        if args.validate:
+            log_info("Validation is currently only supported for ONNX output mode. Skipping validation.")
         torch.save(model, save_path)
-        print(f"[SUCCESS] Model saved to {save_path}")
+        log_success(f"Model saved to {save_path}")
 
     elif args.output_mode == 'onnx':
-        print(f"[INFO] Starting ONNX export process...")
-        save_path = args.output if args.output.endswith('.onnx') else args.output + '.onnx'
+        log_info("Starting ONNX export process...")
+        save_path = args.output
+        if not save_path.lower().endswith('.onnx'):
+            save_path += '.onnx'
 
         try:
             is_ultralytics = try_export_ultralytics(model, args.shape, save_path)
             
             if not is_ultralytics:
-                print("[INFO] Standard model detected. Using generic export.")
+                log_info("Standard model detected. Using generic export.")
                 export_pytorch_to_onnx(model, args.shape, save_path)
             
-            print("[INFO] Running NPU optimization patches...")
+            log_info("Running NPU optimization patches...")
             final_path = optimize_for_npu(save_path, simplify=not args.no_simplify)
             
             if args.validate:
-                print("[INFO] Validating conversion...")
+                source_name = "Darknet" if args.mode == 'darknet' else "PyTorch"
+                log_info(f"Phase 1: Comparing {source_name} and ONNX outputs...")
                 is_valid = validate_conversion(model, final_path, args.shape)
-                if is_valid:
-                    print(f"[SUCCESS] Validation passed. Model is ready for NPU.")
-                else:
-                    print(f"[WARNING] Validation completed with mismatches. Check the details above.")
-            else:
-                print(f"[SUCCESS] Export finished: {final_path}")
                 
+                log_info("Phase 2: Testing inference with OpenCV DNN...")
+                inference_ok = validate_with_opencv(final_path, args.shape)
+                
+                if is_valid and inference_ok:
+                    log_success("All validation phases passed. Model is ready for NPU.")
+                else:
+                    log_warning("Validation completed with some issues. Check the log above.")
+            print(f"\n" + "="*50)
+            print(f"  CONVERSION REPORT")
+            print(f"="*50)
+            print(f"  Source Model : {args.weights or args.cfg}")
+            print(f"  Output Path  : {final_path}")
+            print(f"  Input Shape  : {args.shape}")
+            
+            if args.validate:
+                status = "PASSED" if (is_valid and inference_ok) else "FAILED / WITH WARNINGS"
+                print(f"  Validation   : {status}")
+            
+            print("="*50 + "\n")
+            
         except Exception as e:
-            print(f"[ERROR] Export failed: {e}")
+            log_error(f"Export failed: {e}")
             sys.exit(1)
 
 if __name__ == "__main__":

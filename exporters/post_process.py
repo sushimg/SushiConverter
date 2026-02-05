@@ -1,5 +1,6 @@
 import onnx
 import os
+from core.logger import log_info, log_warning, log_success
 
 def optimize_for_npu(onnx_path, simplify=True):
     TARGET_OPSET = 11
@@ -10,26 +11,30 @@ def optimize_for_npu(onnx_path, simplify=True):
     if simplify:
         try:
             from onnxsim import simplify as onnx_simplify
-            print("[INFO] Simplifying ONNX model...")
+            log_info("Simplifying ONNX model...")
             model, check = onnx_simplify(model)
             if not check:
-                print("[WARNING] Simplification check failed but proceeding.")
+                log_warning("Simplification check failed but proceeding.")
         except ImportError:
-            print("[WARNING] onnx-simplifier not found. Skipping simplification.")
+            log_warning("onnx-simplifier not found. Export will be less optimized.")
+            log_info("You can install it with: pip install onnx-simplifier")
     
     if model.ir_version > TARGET_IR:
-        print(f"[INFO] Lowering IR version from v{model.ir_version} to v{TARGET_IR}")
+        log_info(f"Lowering IR version from v{model.ir_version} to v{TARGET_IR}")
         model.ir_version = TARGET_IR
 
     for opset_import in model.opset_import:
         if opset_import.domain == '' or opset_import.domain == 'ai.onnx':
+            if opset_import.version != TARGET_OPSET:
+                log_info(f"Forcing Opset version {opset_import.version} -> {TARGET_OPSET}")
             opset_import.version = TARGET_OPSET
             
     onnx.save(model, onnx_path)
     
     data_file = onnx_path + ".data"
     if os.path.exists(data_file):
+        log_info(f"Cleaning up external weights file: {data_file}")
         os.remove(data_file)
     
-    print("[SUCCESS] Post-processing finished.")
+    log_success("Post-processing finished.")
     return onnx_path
